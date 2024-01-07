@@ -1,6 +1,6 @@
-CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 pretraining.py \
+CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node 1 pretraining.py \
     --model_type bloom \
-    --model_name_or_path bigscience/bloomz-560m \
+    --model_name_or_path ../../data/model/bloomz-560m \
     --train_file_dir ./data/pretrain \
     --validation_file_dir ./data/pretrain \
     --per_device_train_batch_size 4 \
@@ -25,7 +25,6 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 pretraining.py \
     --gradient_accumulation_steps 1 \
     --preprocessing_num_workers 10 \
     --block_size 512 \
-    --group_by_length True \
     --output_dir outputs-pt-bloom-v1 \
     --overwrite_output_dir \
     --ddp_timeout 30000 \

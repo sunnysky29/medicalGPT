@@ -19,10 +19,9 @@ part of this code is adapted from https://github.com/huggingface/transformers/bl
 """
 import math
 import os
-from dataclasses import dataclass, field
+
 from glob import glob
 from itertools import chain
-from typing import Optional, List, Dict, Any, Mapping
 
 import numpy as np
 import torch
@@ -30,181 +29,9 @@ from datasets import load_dataset
 from loguru import logger
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel, prepare_model_for_kbit_training
 from sklearn.metrics import accuracy_score
-from transformers import (
-    AutoConfig,
-    BloomForCausalLM,
-    AutoModelForCausalLM,
-    AutoModel,
-    LlamaTokenizer,
-    LlamaForCausalLM,
-    BloomTokenizerFast,
-    AutoTokenizer,
-    HfArgumentParser,
-    Trainer,
-    Seq2SeqTrainingArguments,
-    is_torch_tpu_available,
-    set_seed,
-    BitsAndBytesConfig,
-)
-from transformers.trainer import TRAINING_ARGS_NAME
-from transformers.utils.versions import require_version
-
-try:
-    from transformers.integrations import is_deepspeed_zero3_enabled
-except ImportError:  # https://github.com/huggingface/transformers/releases/tag/v4.33.1
-    from transformers.deepspeed import is_deepspeed_zero3_enabled
-
-MODEL_CLASSES = {
-    "bloom": (AutoConfig, BloomForCausalLM, BloomTokenizerFast),
-    "chatglm": (AutoConfig, AutoModel, AutoTokenizer),
-    "llama": (AutoConfig, LlamaForCausalLM, LlamaTokenizer),
-    "baichuan": (AutoConfig, AutoModelForCausalLM, AutoTokenizer),
-    "auto": (AutoConfig, AutoModelForCausalLM, AutoTokenizer),
-}
 
 
-@dataclass
-class ModelArguments:
-    """
-    Arguments pertaining to which model/config/tokenizer we are going to fine-tune, or train from scratch.
-    """
-
-    model_type: str = field(
-        default=None,
-        metadata={"help": "Model type selected in the list: " + ", ".join(MODEL_CLASSES.keys())}
-    )
-    model_name_or_path: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": (
-                "The model checkpoint for weights initialization.Don't set if you want to train a model from scratch."
-            )
-        },
-    )
-    tokenizer_name_or_path: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": (
-                "The tokenizer for weights initialization.Don't set if you want to train a model from scratch."
-            )
-        },
-    )
-    load_in_8bit: bool = field(default=False, metadata={"help": "Whether to load the model in 8bit mode or not."})
-    load_in_4bit: bool = field(default=False, metadata={"help": "Whether to load the model in 4bit mode or not."})
-    cache_dir: Optional[str] = field(
-        default=None,
-        metadata={"help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
-    )
-    use_fast_tokenizer: bool = field(
-        default=False,
-        metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
-    )
-    torch_dtype: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": (
-                "Override the default `torch.dtype` and load the model under this dtype. If `auto` is passed, the "
-                "dtype will be automatically derived from the model's weights."
-            ),
-            "choices": ["auto", "bfloat16", "float16", "float32"],
-        },
-    )
-    device_map: Optional[str] = field(
-        default="auto",
-        metadata={"help": "Device to map model to. If `auto` is passed, the device will be selected automatically. "},
-    )
-    trust_remote_code: bool = field(
-        default=True,
-        metadata={"help": "Whether to trust remote code when loading a model from a remote checkpoint."},
-    )
-
-    def __post_init__(self):
-        if self.model_type is None:
-            raise ValueError(
-                "You must specify a valid model_type to run training. Available model types are " + ", ".join(
-                    MODEL_CLASSES.keys()))
-        if self.model_name_or_path is None:
-            raise ValueError("You must specify a valid model_name_or_path to run training.")
-
-
-@dataclass
-class DataArguments:
-    """
-    Arguments pertaining to what data we are going to input our model for training and eval.
-    """
-
-    dataset_name: Optional[str] = field(
-        default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
-    )
-    dataset_config_name: Optional[str] = field(
-        default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
-    )
-    train_file_dir: Optional[str] = field(default=None, metadata={"help": "The train text data file folder."})
-    validation_file_dir: Optional[str] = field(
-        default=None,
-        metadata={"help": "An optional input evaluation data file to evaluate the perplexity on text file folder."},
-    )
-    max_train_samples: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": (
-                "For debugging purposes or quicker training, truncate the number of training examples to this "
-                "value if set."
-            )
-        },
-    )
-    max_eval_samples: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": (
-                "For debugging purposes or quicker training, truncate the number of evaluation examples to this "
-                "value if set."
-            )
-        },
-    )
-    streaming: bool = field(default=False, metadata={"help": "Enable streaming mode"})
-    block_size: Optional[int] = field(
-        default=1024,
-        metadata={
-            "help": (
-                "Optional input sequence length after tokenization. "
-                "The training dataset will be truncated in block of this size for training. "
-                "Default to the model max input length for single sentence inputs (take into account special tokens)."
-            )
-        },
-    )
-    overwrite_cache: bool = field(
-        default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
-    )
-    validation_split_percentage: Optional[int] = field(
-        default=1,
-        metadata={
-            "help": "The percentage of the train set used as validation set in case there's no validation split"
-        },
-    )
-    preprocessing_num_workers: Optional[int] = field(
-        default=None,
-        metadata={"help": "The number of processes to use for the preprocessing."},
-    )
-    keep_linebreaks: bool = field(
-        default=True, metadata={"help": "Whether to keep line breaks when using TXT files or not."}
-    )
-
-    def __post_init__(self):
-        if self.streaming:
-            require_version("datasets>=2.0.0", "The streaming feature requires `datasets>=2.0.0`")
-
-
-@dataclass
-class ScriptArguments:
-    use_peft: bool = field(default=True, metadata={"help": "Whether to use peft"})
-    target_modules: Optional[str] = field(default="all")
-    lora_rank: Optional[int] = field(default=8)
-    lora_dropout: Optional[float] = field(default=0.05)
-    lora_alpha: Optional[float] = field(default=32.0)
-    modules_to_save: Optional[str] = field(default=None)
-    peft_path: Optional[str] = field(default=None)
-    qlora: bool = field(default=False, metadata={"help": "Whether to use qlora"})
+from utils import *
 
 
 def accuracy(predictions, references, normalize=True, sample_weight=None):
@@ -379,6 +206,8 @@ def main():
         + f" distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
     )
 
+    # exit()
+    
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
@@ -394,6 +223,10 @@ def main():
     if not tokenizer_name_or_path:
         tokenizer_name_or_path = model_args.model_name_or_path
     tokenizer = tokenizer_class.from_pretrained(tokenizer_name_or_path, **tokenizer_kwargs)
+
+    # Preprocessing the datasets.
+    def tokenize_function(examples):
+        return tokenizer(examples["text"])
 
     if data_args.block_size is None:
         block_size = tokenizer.model_max_length
@@ -411,23 +244,8 @@ def main():
             )
         block_size = min(data_args.block_size, tokenizer.model_max_length)
 
-    # Preprocessing the datasets.
-    def tokenize_function(examples):
-        tokenized_inputs = tokenizer(
-            examples["text"],
-            truncation=True,
-            padding='max_length',
-            max_length=block_size
-        )
-        # Copy the input_ids to the labels for language modeling. This is suitable for both
-        # masked language modeling (like BERT) or causal language modeling (like GPT).
-        tokenized_inputs["labels"] = tokenized_inputs["input_ids"].copy()
-
-        return tokenized_inputs
-
     # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
-    def tokenize_and_group_text_function(examples):
-        examples = tokenizer(examples["text"])
+    def group_texts(examples):
         # Concatenate all texts.
         concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
         total_length = len(concatenated_examples[list(examples.keys())[0]])
@@ -534,40 +352,36 @@ def main():
 
     with training_args.main_process_first(desc="Dataset tokenization and grouping"):
         if not data_args.streaming:
-            if training_args.group_by_length:
-                lm_datasets = raw_datasets.map(
-                    tokenize_and_group_text_function,
-                    batched=True,
-                    num_proc=data_args.preprocessing_num_workers,
-                    load_from_cache_file=not data_args.overwrite_cache,
-                    desc=f"Grouping texts in chunks of {block_size}",
-                )
-            else:
-                lm_datasets = raw_datasets.map(
-                    tokenize_function,
-                    batched=True,
-                    num_proc=data_args.preprocessing_num_workers,
-                    remove_columns=column_names,
-                    load_from_cache_file=not data_args.overwrite_cache,
-                    desc="Running tokenizer on dataset",
-                )
+            tokenized_datasets = raw_datasets.map(
+                tokenize_function,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_columns=column_names,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="Running tokenizer on dataset",
+            )
+            lm_datasets = tokenized_datasets.map(
+                group_texts,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc=f"Grouping texts in chunks of {block_size}",
+            )
         else:
-            if training_args.group_by_length:
-                lm_datasets = raw_datasets.map(
-                    tokenize_and_group_text_function,
-                    batched=True,
-                )
-            else:
-                lm_datasets = raw_datasets.map(
-                    tokenize_function,
-                    batched=True,
-                    remove_columns=column_names,
-                )
+            tokenized_datasets = raw_datasets.map(
+                tokenize_function,
+                batched=True,
+                remove_columns=column_names,
+            )
+            lm_datasets = tokenized_datasets.map(
+                group_texts,
+                batched=True,
+            )
 
     train_dataset = None
     max_train_samples = 0
     if training_args.do_train:
-        if "train" not in lm_datasets:
+        if "train" not in tokenized_datasets:
             raise ValueError("--do_train requires a train dataset")
         train_dataset = lm_datasets['train']
         max_train_samples = len(train_dataset)
@@ -581,7 +395,7 @@ def main():
     eval_dataset = None
     max_eval_samples = 0
     if training_args.do_eval:
-        if "validation" not in lm_datasets:
+        if "validation" not in tokenized_datasets:
             raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = lm_datasets["validation"]
         max_eval_samples = len(eval_dataset)
@@ -670,12 +484,10 @@ def main():
                 lora_dropout=script_args.lora_dropout,
                 modules_to_save=modules_to_save)
             model = get_peft_model(model, peft_config)
-        for param in filter(lambda p: p.requires_grad, model.parameters()):
-            param.data = param.data.to(torch.float32)
         model.print_trainable_parameters()
     else:
         logger.info("Fine-tuning method: Full parameters training")
-        # model = model.float()
+        model = model.float()
         print_trainable_parameters(model)
 
     # Initialize our Trainer
